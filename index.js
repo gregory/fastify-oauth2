@@ -11,23 +11,20 @@ function defaultGenerateStateFunction () {
   return defaultState
 }
 
-function defaultCheckStateFunction (state, callback) {
-  if (state === defaultState) {
-    callback()
-    return
-  }
-  callback(new Error('Invalid state'))
-}
-
 const oauthPlugin = fp(function (fastify, options, next) {
+  if (options.getOptions && typeof options.getOptions !== 'function') {
+    return next(new Error('options.getCredentials should be a function'))
+  }
   if (typeof options.name !== 'string') {
     return next(new Error('options.name should be a string'))
   }
-  if (typeof options.credentials !== 'object') {
-    return next(new Error('options.credentials should be an object'))
-  }
-  if (typeof options.callbackUri !== 'string') {
-    return next(new Error('options.callbackUri should be a string'))
+  if (!options.getOptions) {
+    if (typeof options.credentials !== 'object') {
+      return next(new Error('options.credentials should be an object'))
+    }
+    if (typeof options.callbackUri !== 'string') {
+      return next(new Error('options.callbackUri should be a string'))
+    }
   }
   if (options.generateStateFunction && typeof options.generateStateFunction !== 'function') {
     return next(new Error('options.generateStateFunction should be a function'))
@@ -43,41 +40,63 @@ const oauthPlugin = fp(function (fastify, options, next) {
   }
 
   const name = options.name
-  const credentials = options.credentials
-  const callbackUri = options.callbackUri
-  const scope = options.scope
   const generateStateFunction = options.generateStateFunction || defaultGenerateStateFunction
-  const checkStateFunction = options.checkStateFunction || defaultCheckStateFunction
   const startRedirectPath = options.startRedirectPath
+  const getOptions = options.getOptions || function () {
+    return {
+      scope: options.scope,
+      callbackUri: options.callbackUri,
+      credentials: options.credentials
+    }
+  }
+
+  function defaultCheckStateFunction (state, callback) {
+    if (state === defaultState) {
+      const opts = getOptions(state)
+      callback(null, opts)
+      return
+    }
+    callback(new Error('Invalid state'))
+  }
+  const checkStateFunction = options.checkStateFunction || defaultCheckStateFunction
 
   function startRedirectHandler (request, reply) {
-    const state = generateStateFunction()
+    const state = generateStateFunction(request)
+    const opts = getOptions(state)
+    const oauth2 = oauth2Module.create(opts.credentials)
 
-    const authorizationUri = this[name].authorizationCode.authorizeURL({
-      redirect_uri: callbackUri,
-      scope: scope,
+    const authorizationUri = oauth2.authorizationCode.authorizeURL({
+      redirect_uri: opts.callbackUri,
+      scope: opts.scope,
       state: state
     })
     reply.redirect(authorizationUri)
-  }
-
-  const cbk = function (o, code, callback) {
-    return o.authorizationCode.getToken({
-      code: code,
-      redirect_uri: callbackUri
-    }, callback)
   }
 
   function getAccessTokenFromAuthorizationCodeFlowCallbacked (request, callback) {
     const code = request.query.code
     const state = request.query.state
 
-    checkStateFunction(state, function (err) {
+    checkStateFunction(state, function (err, opts) {
       if (err) {
         callback(err)
         return
       }
-      cbk(fastify[name], code, callback)
+      const oauth2 = oauth2Module.create(opts.credentials)
+      return oauth2.authorizationCode.getToken({
+        code: code,
+        redirect_uri: opts.callbackUri
+      }, function (error, result) {
+        if (error) {
+          callback(error)
+          return
+        }
+        if (options.getOptions) {
+          callback(null, { result, oauth2, options: opts })
+        } else {
+          return callback(null, result)
+        }
+      })
     })
   }
   const getAccessTokenFromAuthorizationCodeFlowPromiseified = promisify(getAccessTokenFromAuthorizationCodeFlowCallbacked)
@@ -89,15 +108,24 @@ const oauthPlugin = fp(function (fastify, options, next) {
     getAccessTokenFromAuthorizationCodeFlowCallbacked(request, callback)
   }
 
-  const oauth2 = oauth2Module.create(credentials)
-
   if (startRedirectPath) {
     fastify.get(startRedirectPath, startRedirectHandler)
-    fastify.decorate('getAccessTokenFromAuthorizationCodeFlow', getAccessTokenFromAuthorizationCodeFlow)
+    if (!fastify.hasDecorator('getAccessTokenFromAuthorizationCodeFlow')) {
+      fastify.decorate('getAccessTokenFromAuthorizationCodeFlow', getAccessTokenFromAuthorizationCodeFlow)
+    }
+  }
+
+  const decoration = {
+    getAccessTokenFromAuthorizationCodeFlow
+  }
+  if (!options.getOptions) {
+    const opts = getOptions()
+    const oauth2 = oauth2Module.create(opts.credentials)
+    Object.assign(decoration, oauth2)
   }
 
   try {
-    fastify.decorate(name, oauth2)
+    fastify.decorate(name, decoration)
   } catch (e) {
     next(e)
     return

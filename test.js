@@ -53,6 +53,63 @@ function makeRequests (t, fastify) {
 }
 
 t.test('fastify-oauth2', t => {
+  t.test('getOptions', t => {
+    const fastify = createFastify({ logger: { level: 'silent' } })
+    const params = {
+      credentials: {
+        client: {
+          id: 'my-client-id',
+          secret: 'my-secret'
+        },
+        auth: oauthPlugin.GITHUB_CONFIGURATION
+      },
+      callbackUri: 'http://localhost:3000/callback',
+      scope: ['notifications']
+    }
+
+    function generateStateFunction (request) {
+      return JSON.stringify(params)
+    }
+
+    function getOptions (state) {
+      return JSON.parse(state)
+    }
+
+    function checkStateFunction (state, callback) {
+      const obj = getOptions(state)
+      if (obj.credentials.client.id === params.credentials.client.id) {
+        callback(null, obj)
+        return
+      }
+      callback(new Error('Invalid state'))
+    }
+
+    fastify.register(oauthPlugin, {
+      name: 'dynamicParams',
+      getOptions,
+      generateStateFunction,
+      checkStateFunction,
+      startRedirectPath: '/login/github'
+    })
+
+    fastify.get('/', function (request, reply) {
+      this.dynamicParams.getAccessTokenFromAuthorizationCodeFlow(request, (err, {result, oauth2}) => {
+        if (err) throw err
+
+        const token = oauth2.accessToken.create(result)
+        reply.send({
+          access_token: token.token.access_token,
+          refresh_token: token.token.refresh_token,
+          expires_in: token.token.expires_in,
+          token_type: token.token.token_type
+        })
+      })
+    })
+
+    t.tearDown(fastify.close.bind(fastify))
+
+    makeRequests(t, fastify)
+  })
   t.test('callback', t => {
     const fastify = createFastify({ logger: { level: 'silent' } })
 
